@@ -950,3 +950,152 @@ plot_crisis_dates <- function(all_ret_values, monthly = 1){
     }
   }
 }
+
+################################################################################################################
+################################################################################################################
+# DATASET CREATION RELATED FUNCTIONS
+################################################################################################################
+################################################################################################################
+
+
+# A helper that creates yearly matrices for each firm characteristic,
+# aligned with the monthly data. Note the fiscal year use
+# (datadate is the end of the fiscal year)
+create_yearly_data <- function(value_used, template_matrix,all_compustat_data){
+  tmp_data = as.data.frame(dcast(all_compustat_data, datadate ~ LPERMNO,
+                                 fun.aggregate = function(r) ifelse(length(unique(r)) > 1, NA, unique(r)),
+                                 value.var=value_used)) 
+  # Convert tmp_data to matrix with dates as rownames
+  tmp = as.character(tmp_data$datadate)
+  tmp_data$datadate <- NULL
+  tmp_data <- as.matrix(tmp_data)
+  rownames(tmp_data) <- tmp
+  # Align with monthly data now
+  rownames(tmp_data) <- rownames(
+    template_matrix)[match(
+      str_sub(rownames(tmp_data),start=1,end=7),
+      str_sub(rownames(template_matrix),start=1,end=7))]
+  tmp_data = tmp_data[,intersect(colnames(tmp_data),
+                                 colnames(template_matrix))]
+  res = NA*template_matrix
+  res[rownames(tmp_data),colnames(tmp_data)] <- tmp_data  
+  # Fill in the gaps
+  # we need to start using the data from the "next month",
+  # after the fiscal year end
+  res = apply(res,2,function(r) {
+    x = fill_NA_previous(r);
+    if(is.na(tail(x,1)) & sum(!is.na(x))) {
+      x[pmin(length(x),tail(which(!is.na(x)),1):
+               (tail(which(!is.na(x)),1)+11))] <- x[tail(which(!is.na(x)),1)]
+    } 
+    c(NA,head(x,-1))
+  }) 
+  rownames(res) <- rownames(template_matrix)
+  res
+}
+
+# Creates cross-sectional percentile based scores for a given company characteristic. 
+get_cross_section_score <- function(company_feature_matrix, company_feature_matrix_used=NULL, zero_special = F, not_used = NULL){
+  datacol = ncol(company_feature_matrix)
+  data_used = company_feature_matrix
+  data_used[data_used %in% not_used] <- NA
+  if (!is.null(company_feature_matrix_used))
+    data_used = cbind(company_feature_matrix,company_feature_matrix_used)
+  tmp = t(apply(data_used,1,function(r){
+    r_scored = r[1:datacol] 
+    r_ecdf = r_scored
+    if (!is.null(company_feature_matrix_used))
+      r_ecdf = r[(datacol+1):length(r)]
+    res = r_scored*NA
+    
+    if (!zero_special){
+      r_scored = scrub(r_scored)
+      r_ecdf = scrub(r_ecdf)
+      if (sum(r_ecdf !=0)) {   # Note: we don't use both NAs and 0s
+        score_fun = ecdf(r_ecdf[r_ecdf!=0])
+        res = ifelse(r_scored!=0, score_fun(r_scored),NA)
+      }
+    } else {
+      if (sum(!is.na(r_ecdf))) {   # Note: we don't use NAs only here
+        score_fun = ecdf(r_ecdf[!is.na(r_ecdf)])
+        res = ifelse(!is.na(r_scored), score_fun(r_scored),NA)
+      }
+    }
+    res
+  }))
+  rownames(tmp) <- rownames(company_feature_matrix)
+  tmp
+}
+
+# Creates cross-sectional percentile based scores for a given company characteristic PER INDUSTRY
+# ASSUMES company_feature_matrix, company_feature_matrix_used, industry_matrix have the same number of colunns!! (for now - needs fixing/clean up)
+# All inputs must be numeric
+get_cross_section_score_industry <- function(company_feature_matrix, company_feature_matrix_used=NULL,industry_matrix, zero_special = F, not_used = NULL){
+  
+  # zero_special is FALSE if we also score the 0s. When zero_special is TRUE then we don't score the 0s. 
+  company_feature_matrix[company_feature_matrix %in% not_used] <- NA
+  if (is.null(company_feature_matrix_used))
+    company_feature_matrix_used = company_feature_matrix
+  
+  resall = company_feature_matrix[1,]*NA
+  names(resall) <- 1:length(resall)
+  
+  tmp = Reduce(rbind,lapply(1:nrow(company_feature_matrix), function(iter){
+    r_scored = company_feature_matrix[iter,] 
+    r_ecdf = company_feature_matrix_used[iter,]
+    r_industry = industry_matrix[iter,] 
+    # !!! ************************ Assumes same length!!! ************************
+    names(r_scored) <- names(r_ecdf) <- names(r_industry) <- 1:length(r_industry)
+    res = resall # Default
+    
+    if (!zero_special){
+      r_scored = scrub(r_scored)
+      r_ecdf = scrub(r_ecdf)
+      if (sum(r_ecdf !=0)) {   # Note: we don't use both NAs and 0s
+        # Do it by industry
+        res = unlist(lapply(unique(r_industry[!is.na(r_industry)]), function(ind) {
+          r_ecdfi = r_ecdf[r_industry %in% ind]
+          r_scoredi = r_scored[r_industry %in% ind]
+          resi = resall[r_industry %in% ind]
+          if (sum(r_ecdfi != 0)){
+            score_fun = ecdf(r_ecdfi[r_ecdfi!= 0])
+            resi = ifelse(r_scoredi!=0, score_fun(r_scoredi),NA)
+          }
+          names(resi) <- names(r_scoredi)
+          resi
+        }))
+        # add the NA industries now
+        tmp = rep(NA,sum(is.na(r_industry)))
+        names(tmp) <- names(r_industry[is.na(r_industry)])
+        res = c(res,tmp)
+        # Just re-order now
+        res = res[names(r_scored)]
+      }
+    } else {
+      if (sum(!is.na(r_ecdf))) {   # Note: we don't use NAs only here
+        # Do it by industry
+        res = unlist(lapply(unique(r_industry[!is.na(r_industry)]), function(ind) {
+          r_ecdfi = r_ecdf[r_industry %in% ind]
+          r_scoredi = r_scored[r_industry %in% ind]
+          resi = resall[r_industry %in% ind]
+          if (sum(!is.na(r_ecdfi))){
+            score_fun = ecdf(r_ecdfi[!is.na(r_ecdfi)])
+            resi = ifelse(!is.na(r_scoredi), score_fun(r_scoredi),NA)
+          }
+          names(resi) <- names(r_scoredi)
+          resi
+        }))
+        # add the NA industries now
+        tmp = rep(NA,sum(is.na(r_industry)))
+        names(tmp) <- names(r_industry[is.na(r_industry)])
+        res = c(res,tmp)
+        # Just re-order now
+        res = res[names(r_scored)]
+      }
+    }
+    res
+  }))
+  rownames(tmp) <- rownames(company_feature_matrix)
+  colnames(tmp) <- colnames(company_feature_matrix)
+  tmp
+}
